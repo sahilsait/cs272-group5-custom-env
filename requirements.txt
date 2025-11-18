@@ -1,0 +1,15 @@
+# Group 5 Custom Highway Environment - Dependencies
+
+# Core dependencies
+gymnasium>=0.29.0
+highway-env>=1.8.0
+numpy>=1.24.0
+
+# For video recording (optional but recommended)
+opencv-python>=4.8.0
+moviepy>=1.0.3
+
+# For training RL agents (optional - choose what you need)
+# stable-baselines3>=2.0.0  # For PPO, DQN, A2C, etc.
+# torch>=2.0.0  # For neural networks
+# tensorboard>=2.14.0  # For training visualization
