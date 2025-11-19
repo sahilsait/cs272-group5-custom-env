@@ -9,6 +9,8 @@ A custom highway-env environment featuring:
 - Traffic (20 AI vehicles)
 - Custom reward function for hazard navigation
 
+#TestComment
+
 Usage:
     import gymnasium as gym
     from group5_custom_env import register_group5_env
