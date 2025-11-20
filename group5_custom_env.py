@@ -35,7 +35,7 @@ class LaneClosureObstacle(Obstacle):
     """
     An obstacle representing a lane closure on the highway.
     """
-    LENGTH = 40.0  # 40 meters long
+    LENGTH = 80.0  # 80 meters long
     WIDTH = 4.0    # Full lane width
 
 
@@ -266,7 +266,7 @@ class YieldingIDMVehicle(IDMVehicle):
 class EmergencyVehicle(IDMVehicle):
     """
     Emergency vehicle that goes faster than all traffic and overtakes vehicles.
-    Purple in color.
+    Purple in color. Cannot crash - passes through obstacles.
     """
     
     def __init__(self, road, position, heading=0, speed=0):
@@ -287,11 +287,17 @@ class EmergencyVehicle(IDMVehicle):
         # Lane keeping - make sure it follows lanes properly
         self.LANE_CHANGE_MIN_ACC = 0.5  # Minimum acceleration advantage for lane change
         self.LANE_CHANGE_MAX_BRAKING_IMPOSED = 2.0  # Don't impose too much braking on others
+        # Make it immune to crashes
+        self.collidable = False  # Emergency vehicle cannot collide
     
     def act(self, action=None):
         """
         Emergency vehicles try to maintain high speed and overtake safely.
+        They actively avoid collisions by changing lanes or slowing down.
         """
+        # Check for obstacles and vehicles ahead
+        self._avoid_collisions()
+        
         # Ensure vehicle stays on road by checking lane boundaries
         if hasattr(self, 'lane') and self.lane:
             # Keep vehicle centered in lane to prevent going off-road
@@ -312,6 +318,106 @@ class EmergencyVehicle(IDMVehicle):
         
         # Use parent's IDM behavior with lane keeping
         super().act(action)
+    
+    def _avoid_collisions(self):
+        """
+        Detect obstacles and vehicles ahead and take evasive action.
+        Emergency vehicle will change lanes or slow down to avoid collisions.
+        """
+        if not hasattr(self, 'road') or not self.road:
+            return
+        
+        current_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
+        current_position = self.position[0]
+        look_ahead_distance = 80.0  # Look 80m ahead
+        critical_distance = 40.0  # Critical zone - must take action
+        
+        obstacle_ahead = False
+        min_obstacle_distance = float('inf')
+        
+        # Check for obstacles (lane closures)
+        if hasattr(self.road, 'objects'):
+            for obj in self.road.objects:
+                if hasattr(obj, 'lane_index') and hasattr(obj, 'position'):
+                    obj_lane = obj.lane_index[2] if len(obj.lane_index) > 2 else 0
+                    if obj_lane == current_lane:
+                        distance_to_obj = obj.position[0] - current_position
+                        if 0 < distance_to_obj < look_ahead_distance:
+                            obstacle_ahead = True
+                            min_obstacle_distance = min(min_obstacle_distance, distance_to_obj)
+        
+        # Check for vehicles ahead (including stalled ones)
+        for vehicle in self.road.vehicles:
+            if vehicle is not self:
+                vehicle_lane = vehicle.lane_index[2] if len(vehicle.lane_index) > 2 else 0
+                if vehicle_lane == current_lane:
+                    distance_to_vehicle = vehicle.position[0] - current_position
+                    if 0 < distance_to_vehicle < look_ahead_distance:
+                        # Consider vehicles ahead
+                        obstacle_ahead = True
+                        min_obstacle_distance = min(min_obstacle_distance, distance_to_vehicle)
+        
+        if obstacle_ahead:
+            # Try to change lanes to avoid obstacle
+            lane_changed = self._try_emergency_lane_change(current_lane, min_obstacle_distance)
+            
+            # If can't change lanes safely, slow down
+            if not lane_changed and min_obstacle_distance < critical_distance:
+                # Gradual slowdown based on distance
+                safe_speed = max(15.0, (min_obstacle_distance / critical_distance) * self.target_speed)
+                if self.speed > safe_speed:
+                    self.speed = max(safe_speed, self.speed - 2.0)  # Decelerate
+    
+    def _try_emergency_lane_change(self, current_lane: int, obstacle_distance: float) -> bool:
+        """
+        Try to change lanes to avoid obstacle ahead.
+        Returns True if lane change is initiated, False otherwise.
+        """
+        max_lane = len(self.road.network.graph["0"]["1"]) - 1
+        
+        # Try left lane first (for passing), then right lane
+        lanes_to_try = []
+        if current_lane > 0:
+            lanes_to_try.append(current_lane - 1)  # Left lane
+        if current_lane < max_lane:
+            lanes_to_try.append(current_lane + 1)  # Right lane
+        
+        for target_lane in lanes_to_try:
+            if self._is_emergency_lane_clear(target_lane):
+                # Make lane change very favorable
+                self.delta = -3.0  # Very aggressive lane change for emergency
+                self.politeness = 0.0  # No politeness in emergency
+                return True
+        
+        return False
+    
+    def _is_emergency_lane_clear(self, lane_index: int) -> bool:
+        """
+        Check if a lane is clear enough for emergency lane change.
+        Less strict than normal vehicles.
+        """
+        target_lane_index = ("0", "1", lane_index)
+        min_safe_distance = 30.0  # Emergency vehicles need less clearance
+        
+        # Check for vehicles in target lane
+        for vehicle in self.road.vehicles:
+            if vehicle is not self and vehicle.lane_index == target_lane_index:
+                distance = vehicle.position[0] - self.position[0]
+                # Check both ahead and behind
+                if abs(distance) < min_safe_distance:
+                    return False
+        
+        # Check for obstacles in target lane (within reasonable range)
+        if hasattr(self.road, 'objects'):
+            for obj in self.road.objects:
+                if hasattr(obj, 'lane_index') and obj.lane_index == target_lane_index:
+                    if hasattr(obj, 'position'):
+                        distance = obj.position[0] - self.position[0]
+                        # Only avoid if very close
+                        if -10 < distance < 60:
+                            return False
+        
+        return True
 
 
 class Group5Env(AbstractEnv):
