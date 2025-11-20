@@ -1,211 +1,252 @@
 """
-Interactive Demo for Group 5 Custom Environment
+Interactive Demo - Group 5 Custom Environment
 
-Control the vehicle manually with keyboard and see environment parameters in real-time.
+Control the ego vehicle using keyboard in the rendering window.
 
 Controls:
-    Arrow Keys:
-        ← LEFT  : Change lane left
-        → RIGHT : Change lane right
-        ↑ UP    : Accelerate
-        ↓ DOWN  : Decelerate
-    SPACE       : Do nothing (IDLE)
-    Q or ESC    : Quit
-    R           : Reset environment
+  LEFT ARROW  - Lane Left
+  RIGHT ARROW - Lane Right
+  UP ARROW    - Faster
+  DOWN ARROW  - Slower
+  SPACE       - Idle (maintain speed)
+  R           - Reset episode
+  ESC         - Exit
 
-Parameters are displayed on screen during gameplay.
+The environment will render in a window and respond to your keypresses in real-time.
 """
 
 import gymnasium as gym
-import pygame
-import sys
+import numpy as np
 from group5_custom_env import register_group5_env
+import pygame
+import time
 
-# Initialize pygame for keyboard input
-pygame.init()
-
-# Register and create environment
+# Register the environment
 register_group5_env()
-env = gym.make('group5-env-v0', render_mode='human')
 
-# Action mapping
-ACTIONS = {
-    pygame.K_LEFT: 0,    # LANE_LEFT
-    pygame.K_SPACE: 1,   # IDLE
-    pygame.K_RIGHT: 2,   # LANE_RIGHT
-    pygame.K_UP: 3,      # FASTER
-    pygame.K_DOWN: 4,    # SLOWER
-}
-
-ACTION_NAMES = {
-    0: "LANE LEFT",
-    1: "IDLE",
-    2: "LANE RIGHT",
-    3: "FASTER",
-    4: "SLOWER"
-}
-
-
-def print_status(obs, reward, terminated, truncated, info, action, step, config):
-    """Print current environment status with parameters."""
-    ego = env.unwrapped.vehicle
+class InteractiveDemo:
+    def __init__(self):
+        self.env = gym.make('group5-env-v0', render_mode='human')
+        self.running = True
+        self.paused = False
+        self.step_count = 0
+        self.episode_reward = 0
+        self.clock = pygame.time.Clock()
+        self.font = None
+        
+    def init_display(self):
+        """Initialize pygame display for text overlay."""
+        pygame.init()
+        try:
+            self.font = pygame.font.Font(None, 24)
+            self.small_font = pygame.font.Font(None, 20)
+        except:
+            self.font = None
+            
+    def get_action_from_keys(self):
+        """Get action based on keyboard input."""
+        keys = pygame.key.get_pressed()
+        
+        # Priority: Lane changes > Speed changes > Idle
+        if keys[pygame.K_LEFT]:
+            return 0, "LANE_LEFT"
+        elif keys[pygame.K_RIGHT]:
+            return 2, "LANE_RIGHT"
+        elif keys[pygame.K_UP]:
+            return 3, "FASTER"
+        elif keys[pygame.K_DOWN]:
+            return 4, "SLOWER"
+        else:
+            return 1, "IDLE"
     
-    print("\n" + "="*80)
-    print(f"STEP {step} | Action: {ACTION_NAMES.get(action, 'NONE')}")
-    print("="*80)
+    def render_overlay(self, screen):
+        """Render text overlay with vehicle information."""
+        # No overlay - just render the environment
+        pass
     
-    # Vehicle Status
-    print("\n📊 EGO VEHICLE STATUS:")
-    print(f"  Position:      {ego.position[0]:.1f} / {config['road_length']}m")
-    print(f"  Speed:         {ego.speed:.1f} m/s (target: {config['reward_speed_range'][0]}-{config['reward_speed_range'][1]} m/s)")
-    print(f"  Lane:          {ego.lane_index[2] if len(ego.lane_index) > 2 else 'N/A'} / {config['lanes_count']-1}")
-    print(f"  Crashed:       {'❌ YES' if ego.crashed else '✅ NO'}")
-    print(f"  On Road:       {'✅ YES' if ego.on_road else '❌ NO'}")
-    
-    # Time Status
-    time_remaining = config['duration'] - env.unwrapped.time
-    print(f"\n⏱️  TIME:")
-    print(f"  Elapsed:       {env.unwrapped.time:.1f}s / {config['duration']}s")
-    print(f"  Remaining:     {time_remaining:.1f}s")
-    
-    # Reward Breakdown
-    print(f"\n🏆 REWARD: {reward:.3f}")
-    if hasattr(env.unwrapped, '_last_rewards'):
-        rewards = env.unwrapped._last_rewards
-        print(f"  - Collision:   {rewards.get('collision_reward', 0):.3f} (weight: {config['collision_reward']})")
-        print(f"  - Speed:       {rewards.get('high_speed_reward', 0):.3f} (weight: {config['high_speed_reward']})")
-        print(f"  - Progress:    {rewards.get('progress_reward', 0):.3f} (weight: {config['progress_reward']})")
-        print(f"  - Success:     {rewards.get('success_reward', 0):.3f} (weight: {config['success_reward']})")
-        print(f"  - Lane Change: {rewards.get('lane_change_reward', 0):.3f} (weight: {config['lane_change_reward']})")
-    
-    # Hazards Info
-    print(f"\n🚧 HAZARDS:")
-    print(f"  Lane Closures:     {len(env.unwrapped.road.objects)} (size: {config['lane_closure_length']}m × {config['lane_closure_width']}m)")
-    emergency_speed = config['ego_initial_speed'] + config['emergency_vehicle_speed_offset']
-    print(f"  Emergency Vehicles: {config['emergency_vehicles_count']} purple @ {emergency_speed} m/s")
-    print(f"  Traffic Vehicles:   {config['vehicles_count']} (yielding enabled)")
-    
-    # Count vehicles by type
-    emergency_count = 0
-    stalled_count = 0
-    for vehicle in env.unwrapped.road.vehicles:
-        if hasattr(vehicle, 'color') and vehicle.color == config['emergency_vehicle_color']:
-            emergency_count += 1
-        elif vehicle.speed == 0 and vehicle != ego:
-            stalled_count += 1
-    
-    print(f"  Stalled Vehicles:   {stalled_count} (speed: {config['stalled_vehicle_speed']} m/s)")
-    
-    # Episode Status
-    if terminated:
-        if ego.crashed:
-            print("\n❌ EPISODE TERMINATED: CRASHED")
-        elif not ego.on_road:
-            print("\n❌ EPISODE TERMINATED: OFF ROAD")
-        elif ego.position[0] >= config['road_length']:
-            print("\n✅ EPISODE TERMINATED: SUCCESS! Reached the end!")
-    elif truncated:
-        print("\n⏱️  EPISODE TRUNCATED: TIME LIMIT")
-    
-    print("\n" + "="*80)
-    print("Controls: ←/→ Lane | ↑/↓ Speed | SPACE Idle | R Reset | Q Quit")
-    print("="*80)
-
+    def run(self):
+        """Main game loop."""
+        self.init_display()
+        
+        obs, info = self.env.reset()
+        self.step_count = 0
+        self.episode_reward = 0
+        
+        print("=" * 80)
+        print("🚗 Interactive Demo Started!")
+        print("=" * 80)
+        print("\n📋 CONTROLS:")
+        print("  ← → : Change Lane Left/Right")
+        print("  ↑ ↓ : Speed Up/Slow Down")
+        print("  SPACE : Idle (maintain current speed)")
+        print("  R : Reset episode")
+        print("  ESC : Exit demo")
+        print("\n📌 INSTRUCTIONS:")
+        print("  - The rendering window will open shortly")
+        print("  - Click on the window to make sure it has focus")
+        print("  - Press any action key to take a step")
+        print("  - The environment pauses between actions (wait for your input)")
+        print("  - Watch for the emergency vehicle (purple) approaching from behind")
+        print("  - Avoid lane closures (obstacles) and stalled vehicles")
+        print("=" * 80)
+        
+        # Initial render
+        self.env.render()
+        try:
+            screen = pygame.display.get_surface()
+            if screen:
+                self.render_overlay(screen)
+                pygame.display.flip()
+        except:
+            pass
+        
+        while self.running:
+            # Wait for action key press
+            waiting_for_action = True
+            action = 1  # Default to IDLE
+            action_name = "IDLE"
+            
+            while waiting_for_action and self.running:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.running = False
+                        waiting_for_action = False
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_ESCAPE:
+                            self.running = False
+                            waiting_for_action = False
+                        elif event.key == pygame.K_r:
+                            print("\n🔄 Resetting episode...")
+                            obs, info = self.env.reset()
+                            self.step_count = 0
+                            self.episode_reward = 0
+                            waiting_for_action = False
+                            # Render after reset
+                            self.env.render()
+                            try:
+                                screen = pygame.display.get_surface()
+                                if screen:
+                                    self.render_overlay(screen)
+                                    pygame.display.flip()
+                            except:
+                                pass
+                            waiting_for_action = True  # Continue waiting
+                        elif event.key == pygame.K_LEFT:
+                            action, action_name = 0, "LANE_LEFT"
+                            waiting_for_action = False
+                        elif event.key == pygame.K_RIGHT:
+                            action, action_name = 2, "LANE_RIGHT"
+                            waiting_for_action = False
+                        elif event.key == pygame.K_UP:
+                            action, action_name = 3, "FASTER"
+                            waiting_for_action = False
+                        elif event.key == pygame.K_DOWN:
+                            action, action_name = 4, "SLOWER"
+                            waiting_for_action = False
+                        elif event.key == pygame.K_SPACE:
+                            action, action_name = 1, "IDLE"
+                            waiting_for_action = False
+                
+                # Keep rendering while waiting
+                try:
+                    screen = pygame.display.get_surface()
+                    if screen:
+                        self.render_overlay(screen)
+                        pygame.display.flip()
+                except:
+                    pass
+                
+                self.clock.tick(30)  # 30 FPS while waiting
+            
+            if not self.running:
+                break
+            
+            # Take step with the chosen action
+            print(f"Action: {action_name}")
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            self.step_count += 1
+            self.episode_reward += reward
+            
+            # Render
+            self.env.render()
+            
+            # Add overlay
+            try:
+                screen = pygame.display.get_surface()
+                if screen:
+                    self.render_overlay(screen)
+                    pygame.display.flip()
+            except:
+                pass
+            
+            # Check if episode ended
+            if terminated or truncated:
+                ego = self.env.unwrapped.vehicle
+                
+                print("\n" + "=" * 80)
+                print("📊 EPISODE ENDED")
+                print("=" * 80)
+                
+                if ego.crashed:
+                    print("   Result: 💥 CRASHED")
+                elif ego.position[0] >= self.env.unwrapped.config['road_length']:
+                    print("   Result: 🎉 SUCCESS!")
+                elif not ego.on_road:
+                    print("   Result: 🚧 WENT OFF ROAD")
+                else:
+                    print("   Result: ⏱️ TIME LIMIT")
+                
+                print(f"   Steps: {self.step_count}")
+                print(f"   Total Reward: {self.episode_reward:.3f}")
+                print(f"   Final Position: {ego.position[0]:.1f}m")
+                print(f"   Progress: {(ego.position[0] / self.env.unwrapped.config['road_length'] * 100):.1f}%")
+                print("=" * 80)
+                print("\nPress R to reset or ESC to exit")
+                
+                # Wait for reset or exit
+                waiting = True
+                while waiting and self.running:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            self.running = False
+                            waiting = False
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                self.running = False
+                                waiting = False
+                            elif event.key == pygame.K_r:
+                                obs, info = self.env.reset()
+                                self.step_count = 0
+                                self.episode_reward = 0
+                                waiting = False
+                                print("\n🔄 New episode started!")
+                                # Render after reset
+                                self.env.render()
+                                try:
+                                    screen = pygame.display.get_surface()
+                                    if screen:
+                                        self.render_overlay(screen)
+                                        pygame.display.flip()
+                                except:
+                                    pass
+                    
+                    self.clock.tick(30)  # Limit to 30 FPS while waiting
+        
+        self.env.close()
+        pygame.quit()
+        print("\n✅ Demo completed!")
 
 def main():
-    """Main interactive loop."""
-    obs, info = env.reset()
-    config = env.unwrapped.config
-    
-    # Store rewards in environment for display
-    env.unwrapped._last_rewards = {}
-    
-    action = 1  # Start with IDLE
-    step = 0
-    total_reward = 0
-    
-    # Print initial status
-    print_status(obs, 0, False, False, info, action, step, config)
-    
-    running = True
-    terminated = False
-    truncated = False
-    
-    while running:
-        # Wait for keyboard input
-        action = 1  # Default to IDLE
-        waiting = True
-        
-        while waiting and running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                    waiting = False
-                    break  # Exit event loop immediately
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_q or event.key == pygame.K_ESCAPE:
-                        running = False
-                        waiting = False
-                        break  # Exit event loop immediately
-                    elif event.key == pygame.K_r:
-                        # Reset environment
-                        obs, info = env.reset()
-                        env.unwrapped._last_rewards = {}
-                        step = 0
-                        total_reward = 0
-                        terminated = False
-                        truncated = False
-                        print("\n🔄 ENVIRONMENT RESET\n")
-                        print_status(obs, 0, False, False, info, 1, step, config)
-                        waiting = False
-                        break  # Exit event loop immediately
-                    elif event.key in ACTIONS:
-                        action = ACTIONS[event.key]
-                        # Debug: Print which key was pressed
-                        key_name = pygame.key.name(event.key)
-                        print(f"🎮 Key pressed: {key_name} -> Action: {ACTION_NAMES[action]} ({action})")
-                        waiting = False
-                        break  # Exit event loop immediately after capturing action
-            
-            # Small delay to prevent CPU spinning
-            pygame.time.wait(10)
-        
-        if not running:
-            break
-        
-        # Don't step if episode is done
-        if terminated or truncated:
-            print("\n⚠️  Episode finished. Press R to reset or Q to quit.")
-            continue
-        
-        # Store lane before action for debugging
-        lane_before = env.unwrapped.vehicle.lane_index[2] if len(env.unwrapped.vehicle.lane_index) > 2 else 'N/A'
-        
-        # Take action
-        obs, reward, terminated, truncated, info = env.step(action)
-        
-        # Store lane after action for debugging
-        lane_after = env.unwrapped.vehicle.lane_index[2] if len(env.unwrapped.vehicle.lane_index) > 2 else 'N/A'
-        
-        # Alert if lane changed on non-lane-change action
-        if action not in [0, 2] and lane_before != lane_after:
-            print(f"⚠️  WARNING: Lane changed from {lane_before} to {lane_after} on {ACTION_NAMES[action]} action!")
-        
-        # Store reward breakdown for display
-        env.unwrapped._last_rewards = env.unwrapped._rewards(action)
-        
-        step += 1
-        total_reward += reward
-        
-        # Render and print status
-        env.render()
-        print_status(obs, reward, terminated, truncated, info, action, step, config)
-        print(f"\n📈 TOTAL REWARD: {total_reward:.3f}")
-    
-    env.close()
-    pygame.quit()
-    print("\n👋 Thanks for testing the environment!")
-
+    """Run interactive demo."""
+    try:
+        demo = InteractiveDemo()
+        demo.run()
+    except KeyboardInterrupt:
+        print("\n\n👋 Demo interrupted by user. Goodbye!")
+    except Exception as e:
+        print(f"\n❌ Error occurred: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

@@ -35,7 +35,7 @@ class LaneClosureObstacle(Obstacle):
     """
     An obstacle representing a lane closure on the highway.
     """
-    LENGTH = 20.0  # 20 meters long
+    LENGTH = 40.0  # 40 meters long
     WIDTH = 4.0    # Full lane width
 
 
@@ -53,6 +53,7 @@ class YieldingIDMVehicle(IDMVehicle):
     def act(self, action=None):
         """
         Check for emergency vehicles and yield if one is approaching from behind.
+        Also avoid obstacles and stalled vehicles ahead.
         """
         # Check for emergency vehicles approaching from behind
         emergency_approaching = self._check_emergency_vehicle_approaching()
@@ -66,6 +67,9 @@ class YieldingIDMVehicle(IDMVehicle):
             if self._emergency_yielding:
                 self._reset_yielding_behavior()
             self._emergency_yielding = False
+        
+        # Check for obstacles ahead and avoid them
+        self._avoid_obstacles_ahead()
         
         # Use parent's IDM behavior
         super().act(action)
@@ -149,6 +153,114 @@ class YieldingIDMVehicle(IDMVehicle):
         if self._speed_modified and self._original_target_speed is not None:
             self.target_speed = self._original_target_speed
             self._speed_modified = False
+    
+    def _avoid_obstacles_ahead(self):
+        """
+        Detect obstacles, stalled vehicles, or lane closures ahead and take evasive action.
+        Either change lanes if possible, or slow down/stop to avoid collision.
+        """
+        if not hasattr(self, 'road') or not self.road:
+            return
+        
+        current_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
+        current_position = self.position[0]
+        look_ahead_distance = 60.0  # Look 60m ahead
+        critical_distance = 30.0  # Critical zone - must take action
+        
+        obstacle_ahead = False
+        min_obstacle_distance = float('inf')
+        
+        # Check for obstacles (lane closures)
+        if hasattr(self.road, 'objects'):
+            for obj in self.road.objects:
+                if hasattr(obj, 'lane_index') and hasattr(obj, 'position'):
+                    obj_lane = obj.lane_index[2] if len(obj.lane_index) > 2 else 0
+                    if obj_lane == current_lane:
+                        distance_to_obj = obj.position[0] - current_position
+                        if 0 < distance_to_obj < look_ahead_distance:
+                            obstacle_ahead = True
+                            min_obstacle_distance = min(min_obstacle_distance, distance_to_obj)
+        
+        # Check for stalled or very slow vehicles ahead
+        for vehicle in self.road.vehicles:
+            if vehicle is not self:
+                vehicle_lane = vehicle.lane_index[2] if len(vehicle.lane_index) > 2 else 0
+                if vehicle_lane == current_lane:
+                    distance_to_vehicle = vehicle.position[0] - current_position
+                    # Consider vehicles that are stopped or very slow (< 5 m/s)
+                    if 0 < distance_to_vehicle < look_ahead_distance and vehicle.speed < 5.0:
+                        obstacle_ahead = True
+                        min_obstacle_distance = min(min_obstacle_distance, distance_to_vehicle)
+        
+        if obstacle_ahead:
+            # Try to change lanes first
+            lane_changed = self._try_lane_change_for_obstacle(current_lane, min_obstacle_distance)
+            
+            # If can't change lanes, slow down or stop
+            if not lane_changed:
+                if min_obstacle_distance < critical_distance:
+                    # Emergency braking
+                    if not self._speed_modified:
+                        self._original_target_speed = self.target_speed
+                        self._speed_modified = True
+                    # Reduce speed based on distance to obstacle
+                    safe_speed = max(0.0, min_obstacle_distance / critical_distance * 10.0)
+                    self.target_speed = safe_speed
+                elif min_obstacle_distance < look_ahead_distance:
+                    # Gradual slowdown
+                    if not self._speed_modified:
+                        self._original_target_speed = self.target_speed
+                        self._speed_modified = True
+                    self.target_speed = max(15.0, self.target_speed * 0.7)
+    
+    def _try_lane_change_for_obstacle(self, current_lane: int, obstacle_distance: float) -> bool:
+        """
+        Try to change lanes to avoid obstacle.
+        Returns True if a lane change is feasible, False otherwise.
+        """
+        max_lane = len(self.road.network.graph["0"]["1"]) - 1
+        
+        # Prefer left lane (lower index) for overtaking
+        lanes_to_try = []
+        if current_lane > 0:
+            lanes_to_try.append(current_lane - 1)  # Left lane
+        if current_lane < max_lane:
+            lanes_to_try.append(current_lane + 1)  # Right lane
+        
+        for target_lane in lanes_to_try:
+            if self._is_lane_clear(target_lane, obstacle_distance):
+                # Make lane change more favorable
+                self.delta = -2.0  # Very aggressive lane change
+                self.politeness = 0.3  # Low politeness for safety
+                return True
+        
+        return False
+    
+    def _is_lane_clear(self, lane_index: int, distance_ahead: float) -> bool:
+        """
+        Check if a lane is clear for a safe lane change.
+        """
+        target_lane_index = ("0", "1", lane_index)
+        min_safe_distance = 40.0  # Need 40m clearance
+        
+        # Check for vehicles in target lane
+        for vehicle in self.road.vehicles:
+            if vehicle is not self and vehicle.lane_index == target_lane_index:
+                distance = vehicle.position[0] - self.position[0]
+                # Check both ahead and behind
+                if abs(distance) < min_safe_distance:
+                    return False
+        
+        # Check for obstacles in target lane
+        if hasattr(self.road, 'objects'):
+            for obj in self.road.objects:
+                if hasattr(obj, 'lane_index') and obj.lane_index == target_lane_index:
+                    if hasattr(obj, 'position'):
+                        distance = obj.position[0] - self.position[0]
+                        if -20 < distance < distance_ahead + 20:
+                            return False
+        
+        return True
 
 
 class EmergencyVehicle(IDMVehicle):
@@ -162,26 +274,43 @@ class EmergencyVehicle(IDMVehicle):
         # Set purple color (RGB normalized 0-1)
         self.color = (0.5, 0.0, 0.5)  # Purple
         # Set higher desired speed than normal traffic
-        self.target_speed = 35.0  # Faster than speed limit (25 m/s) and ego vehicle
-        # Aggressive behavior for overtaking
+        self.target_speed = 27.0  # 2 m/s faster than ego
+        # Aggressive but controlled behavior for overtaking
         self.speed = min(speed, self.target_speed)
-        # More aggressive lane changing parameters for MOBIL
-        self.politeness = 0.0  # No politeness - always prioritize own speed (default is usually 0.5)
-        self.delta = -0.5  # Lower threshold for lane changes (default is usually 0.0)
-        # Lower time headway for more aggressive following
-        self.T = 0.5  # Default is usually 1.0-1.5
-        # Higher acceleration capability
-        self.ACC_MAX = 6.0  # More aggressive acceleration (default is usually 3.0)
+        # Lane changing parameters for MOBIL - less aggressive to stay stable
+        self.politeness = 0.1  # Low politeness but not zero
+        self.delta = -0.3  # Easier lane changes but not too aggressive
+        # Time headway
+        self.T = 0.8  # Closer following but safe
+        # Acceleration
+        self.ACC_MAX = 4.0  # Moderate acceleration
+        # Lane keeping - make sure it follows lanes properly
+        self.LANE_CHANGE_MIN_ACC = 0.5  # Minimum acceleration advantage for lane change
+        self.LANE_CHANGE_MAX_BRAKING_IMPOSED = 2.0  # Don't impose too much braking on others
     
     def act(self, action=None):
         """
-        Emergency vehicles always try to maintain high speed and overtake.
+        Emergency vehicles try to maintain high speed and overtake safely.
         """
-        # Force high speed - emergency vehicles accelerate faster
-        if self.speed < self.target_speed:
-            self.speed = min(self.speed + 3.0, self.target_speed)
+        # Ensure vehicle stays on road by checking lane boundaries
+        if hasattr(self, 'lane') and self.lane:
+            # Keep vehicle centered in lane to prevent going off-road
+            lateral_position = self.position[1]
+            lane_center = self.lane.position(self.lane.local_coordinates(self.position)[0], 0)[1]
+            
+            # If drifting too far from center, correct heading
+            lateral_error = lateral_position - lane_center
+            if abs(lateral_error) > 1.5:  # More than 1.5m from center
+                # Gentle correction towards lane center
+                correction = -0.1 * lateral_error
+                self.heading += correction
         
-        # Use parent's IDM behavior but with aggressive parameters
+        # Maintain target speed with smooth acceleration
+        if self.speed < self.target_speed:
+            acceleration = min(1.5, self.target_speed - self.speed)  # Smooth acceleration
+            self.speed = min(self.speed + acceleration, self.target_speed)
+        
+        # Use parent's IDM behavior with lane keeping
         super().act(action)
 
 
@@ -229,9 +358,9 @@ class Group5Env(AbstractEnv):
                 "stalled_position_after_range": [450, 550],
 
                 # Emergency vehicle config
-                "emergency_vehicles_count": 2,  # Number of emergency vehicles
-                "emergency_vehicle_speed": 35.0,  # Target speed (m/s)
-                "emergency_spawn_range": [100, 500],  # Where they can spawn
+                "emergency_vehicles_count": 1,  # Number of emergency vehicles
+                "emergency_vehicle_speed": 27.0,  # Target speed (2 units faster than ego at 25 m/s)
+                "emergency_spawn_behind_ego": 50.0,  # Spawns 50m behind ego
 
                 # Reward weights - tuned for hazard navigation
                 "collision_reward": -1.5,      # Heavy penalty for crashing
@@ -269,40 +398,49 @@ class Group5Env(AbstractEnv):
         )
         self.road.objects.append(lane_closure)
 
-        # Stalled Vehicle
+        # Stalled Vehicles - one before closure, one after closure
         lanes = list(range(self.config["lanes_count"]))
         available_lanes = [lane for lane in lanes if lane != closure_lane]
-        stalled_lane = self.np_random.choice(available_lanes)
-
-        if self.np_random.random() < 0.5:
-            pos_min, pos_max = self.config["stalled_position_before_range"]
-        else:
-            pos_min, pos_max = self.config["stalled_position_after_range"]
-
-        stalled_position = self.np_random.uniform(pos_min, pos_max)
-        stalled_vehicle = Vehicle.make_on_lane(
+        
+        # First stalled vehicle - before the closure
+        stalled_lane_1 = self.np_random.choice(available_lanes)
+        pos_min, pos_max = self.config["stalled_position_before_range"]
+        stalled_position_1 = self.np_random.uniform(pos_min, pos_max)
+        stalled_vehicle_1 = Vehicle.make_on_lane(
             self.road,
-            lane_index=("0", "1", stalled_lane),
-            longitudinal=stalled_position,
+            lane_index=("0", "1", stalled_lane_1),
+            longitudinal=stalled_position_1,
             speed=0.0
         )
-        self.road.vehicles.append(stalled_vehicle)
+        self.road.vehicles.append(stalled_vehicle_1)
+        
+        # Second stalled vehicle - after the closure
+        stalled_lane_2 = self.np_random.choice(available_lanes)
+        pos_min, pos_max = self.config["stalled_position_after_range"]
+        stalled_position_2 = self.np_random.uniform(pos_min, pos_max)
+        stalled_vehicle_2 = Vehicle.make_on_lane(
+            self.road,
+            lane_index=("0", "1", stalled_lane_2),
+            longitudinal=stalled_position_2,
+            speed=0.0
+        )
+        self.road.vehicles.append(stalled_vehicle_2)
 
         # Emergency Vehicles
         emergency_count = self.config["emergency_vehicles_count"]
-        spawn_min, spawn_max = self.config["emergency_spawn_range"]
         
         for _ in range(emergency_count):
-            # Random lane for emergency vehicle
-            emergency_lane = self.np_random.integers(0, self.config["lanes_count"])
-            emergency_position = self.np_random.uniform(spawn_min, spawn_max)
+            # Spawn in middle lane (lane 2 for 5-lane highway: 0,1,2,3,4)
+            middle_lane = self.config["lanes_count"] // 2
+            # Spawn 50m behind ego (ego starts at 0, so emergency at -50)
+            emergency_position = -self.config["emergency_spawn_behind_ego"]
             
             # Create emergency vehicle
             emergency_vehicle = EmergencyVehicle.make_on_lane(
                 self.road,
-                lane_index=("0", "1", emergency_lane),
+                lane_index=("0", "1", middle_lane),
                 longitudinal=emergency_position,
-                speed=self.config["emergency_vehicle_speed"] * 0.8  # Start at 80% of target speed
+                speed=self.config["emergency_vehicle_speed"] * 0.9  # Start at 90% of target speed
             )
             # Update target speed from config
             emergency_vehicle.target_speed = self.config["emergency_vehicle_speed"]
@@ -322,10 +460,20 @@ class Group5Env(AbstractEnv):
 
     def _create_vehicles(self) -> None:
         """Create ego vehicle and traffic."""
-        # Ego vehicle
-        ego_vehicle = Vehicle.create_random(self.road, speed=25.0, spacing=2.0)
+        # Ego vehicle - start at middle lane (lane 2) at position 0
+        middle_lane = self.config["lanes_count"] // 2
+        
+        # Create a base vehicle at the desired position
+        ego_lane_index = ("0", "1", middle_lane)
+        ego_lane = self.road.network.get_lane(ego_lane_index)
+        ego_position = ego_lane.position(0.0, 0)  # longitudinal=0, lateral=0
+        
+        # Create ego vehicle with action type wrapper
         ego_vehicle = self.action_type.vehicle_class(
-            self.road, ego_vehicle.position, ego_vehicle.heading, ego_vehicle.speed
+            self.road,
+            ego_position,
+            heading=ego_lane.heading_at(0.0),
+            speed=25.0
         )
         self.controlled_vehicles = [ego_vehicle]
         self.road.vehicles.append(ego_vehicle)

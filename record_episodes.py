@@ -7,6 +7,10 @@ warnings.filterwarnings('ignore', category=UserWarning, module='gymnasium.envs.r
 import gymnasium as gym
 import highway_env
 import os
+from group5_custom_env import register_group5_env
+
+# Register the custom environment
+register_group5_env()
 
 # Configuration
 NUM_EPISODES = 3  # Record 3 episodes
