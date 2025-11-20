@@ -35,8 +35,8 @@ class LaneClosureObstacle(Obstacle):
     """
     An obstacle representing a lane closure on the highway.
     """
-    LENGTH = 80.0  # 80 meters long
-    WIDTH = 4.0    # Full lane width
+    LENGTH = 150.0  # 150 meters long
+    WIDTH = 4.0     # Full lane width
 
 
 class YieldingIDMVehicle(IDMVehicle):
@@ -469,16 +469,16 @@ class Group5Env(AbstractEnv):
                 "emergency_spawn_behind_ego": 50.0,  # Spawns 50m behind ego
 
                 # Reward weights - tuned for hazard navigation
-                "collision_reward": -1.5,      # Heavy penalty for crashing
+                "collision_reward": -10.0,     # Heavy penalty for crashing
                 "high_speed_reward": 0.3,      # Moderate reward for speed
                 "progress_reward": 0.4,        # Good reward for moving forward
-                "success_reward": 1.0,         # Big bonus for completion
-                "lane_change_reward": -0.01,   # Small penalty for lane changes
-                "yielding_reward": 0.0,        # For future emergency vehicle
+                "success_reward": 2.0,         # Reduced success bonus (less dominant)
+                "lane_change_reward": -0.05,   # Penalty for lane changes (5x original)
+                "yielding_reward": 1.0,        # Reward for yielding to emergency vehicle
 
                 # Reward settings
                 "normalize_reward": False,
-                "reward_speed_range": [20, 28],  # Target speed range (m/s)
+                "reward_speed_range": [24, 27],  # Target speed range (24-27 m/s)
             }
         )
         return config
@@ -487,6 +487,10 @@ class Group5Env(AbstractEnv):
         self._create_road()
         self._create_vehicles()
         self._spawn_custom_elements()
+        # Reset tracking variables
+        self._prev_position = 0.0
+        self._emergency_passed = False
+        self._emergency_was_behind = False
 
     def _spawn_custom_elements(self):
         """Spawn lane closure, stalled vehicle, and emergency vehicles with random positions."""
@@ -607,17 +611,20 @@ class Group5Env(AbstractEnv):
         # === 1. COLLISION PENALTY ===
         collision = float(ego.crashed)
 
-        # === 2. SPEED REWARD ===
+        # === 2. SPEED REWARD (only for 23-27 m/s range) ===
         forward_speed = ego.speed * np.cos(ego.heading)
-        scaled_speed = utils.lmap(
-            forward_speed,
-            self.config["reward_speed_range"],
-            [0, 1]
-        )
-        high_speed = np.clip(scaled_speed, 0, 1)
+        speed_min, speed_max = self.config["reward_speed_range"]
+        # Reward only if within target range
+        high_speed = 1.0 if speed_min <= forward_speed <= speed_max else 0.0
 
-        # === 3. PROGRESS REWARD ===
-        progress = ego.position[0] / self.config["road_length"]
+        # === 3. PROGRESS REWARD (per-step distance moved) ===
+        # Track previous position to calculate distance moved this step
+        if not hasattr(self, '_prev_position'):
+            self._prev_position = 0.0
+        
+        distance_moved = ego.position[0] - self._prev_position
+        progress = distance_moved / self.config["road_length"]
+        self._prev_position = ego.position[0]
 
         # === 4. SUCCESS BONUS ===
         reached_end = (
@@ -626,21 +633,37 @@ class Group5Env(AbstractEnv):
         )
         success = float(reached_end)
 
-        # === 5. ON-ROAD CHECK ===
-        on_road = float(ego.on_road)
-
-        # === 6. LANE CHANGE PENALTY ===
+        # === 5. LANE CHANGE PENALTY ===
         lane_change = float(action in [0, 2])
 
-        # === 7. YIELDING REWARD ===
+        # === 6. YIELDING REWARD (when emergency vehicle passes) ===
         yielding = 0.0
+        
+        # Track emergency vehicle position to detect passing
+        if not hasattr(self, '_emergency_passed'):
+            self._emergency_passed = False
+            self._emergency_was_behind = False
+        
+        # Find emergency vehicle
+        for vehicle in self.road.vehicles:
+            if hasattr(vehicle, 'color') and vehicle.color == (0.5, 0.0, 0.5):
+                emergency_distance = vehicle.position[0] - ego.position[0]
+                emergency_is_ahead = emergency_distance > 0
+                
+                # Check if emergency vehicle just passed (was behind, now ahead)
+                if self._emergency_was_behind and emergency_is_ahead and not self._emergency_passed:
+                    yielding = 1.0
+                    self._emergency_passed = True
+                
+                # Update tracking for next step (emergency is behind if distance < 0)
+                self._emergency_was_behind = not emergency_is_ahead
+                break
 
         return {
             "collision_reward": collision,
             "high_speed_reward": high_speed,
             "progress_reward": progress,
             "success_reward": success,
-            "on_road_reward": on_road,
             "lane_change_reward": lane_change,
             "yielding_reward": yielding,
         }
@@ -653,14 +676,14 @@ class Group5Env(AbstractEnv):
             Scalar reward value
         """
         rewards = self._rewards(action)
+        
+        # Store the last rewards for logging purposes
+        self._last_rewards = rewards
 
         reward = sum(
             self.config.get(name, 0) * value
             for name, value in rewards.items()
-            if name != "on_road_reward"
         )
-
-        reward *= rewards["on_road_reward"]
 
         return reward
 
