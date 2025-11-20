@@ -287,8 +287,8 @@ class EmergencyVehicle(IDMVehicle):
         # Lane keeping - make sure it follows lanes properly
         self.LANE_CHANGE_MIN_ACC = 0.5  # Minimum acceleration advantage for lane change
         self.LANE_CHANGE_MAX_BRAKING_IMPOSED = 2.0  # Don't impose too much braking on others
-        # Make it immune to crashes
-        self.collidable = False  # Emergency vehicle cannot collide
+        # Emergency vehicle can collide (physics enabled)
+        self.collidable = True  # Emergency vehicle has physics enabled
     
     def act(self, action=None):
         """
@@ -469,10 +469,10 @@ class Group5Env(AbstractEnv):
                 "emergency_spawn_behind_ego": 50.0,  # Spawns 50m behind ego
 
                 # Reward weights - tuned for hazard navigation
-                "collision_reward": -10.0,     # Heavy penalty for crashing
+                "collision_reward": -1.0,      # Collision penalty
                 "high_speed_reward": 0.3,      # Moderate reward for speed
                 "progress_reward": 0.4,        # Good reward for moving forward
-                "success_reward": 2.0,         # Reduced success bonus (less dominant)
+                "success_reward": 1.0,         # Success bonus
                 "lane_change_reward": -0.05,   # Penalty for lane changes (5x original)
                 "yielding_reward": 1.0,        # Reward for yielding to emergency vehicle
 
