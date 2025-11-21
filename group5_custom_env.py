@@ -5,8 +5,8 @@ A custom highway-env environment featuring:
 - 5-lane straight highway
 - Randomized lane closures (40m obstacles)
 - Randomized stalled vehicles
-- Emergency vehicles (faster, purple, overtake all traffic)
-- Traffic (20 AI vehicles)
+- Emergency vehicles (faster, purple, traffic priority)
+- Traffic (10 AI vehicles)
 - Custom reward function for hazard navigation
 
 Usage:
@@ -27,6 +27,29 @@ from highway_env.road.road import Road, RoadNetwork
 from highway_env.vehicle.objects import Obstacle
 from highway_env.vehicle.kinematics import Vehicle
 from highway_env.vehicle.behavior import IDMVehicle
+
+# === Monkey-patch to add emergency vehicle detection to observations ===
+# The agent needs to know which vehicles are emergency vehicles, so we add
+# an 'is_emergency' field to the observation data for all vehicles and obstacles.
+
+original_vehicle_to_dict = Vehicle.to_dict
+original_obstacle_to_dict = Obstacle.to_dict
+
+def custom_vehicle_to_dict(self, origin_vehicle=None, observe_intentions=True):
+    """Add emergency vehicle indicator to vehicle observations."""
+    vehicle_data = original_vehicle_to_dict(self, origin_vehicle, observe_intentions)
+    vehicle_data['is_emergency'] = float(getattr(self, 'is_emergency', False))
+    return vehicle_data
+
+def custom_obstacle_to_dict(self, origin_vehicle=None, observe_intentions=True):
+    """Add emergency vehicle indicator to obstacle observations (always False)."""
+    obstacle_data = original_obstacle_to_dict(self, origin_vehicle, observe_intentions)
+    obstacle_data['is_emergency'] = 0.0  # Obstacles are never emergency vehicles
+    return obstacle_data
+
+# Apply the custom observation methods
+Vehicle.to_dict = custom_vehicle_to_dict
+Obstacle.to_dict = custom_obstacle_to_dict
 
 Observation = np.ndarray
 
@@ -55,11 +78,11 @@ class YieldingIDMVehicle(IDMVehicle):
         Check for emergency vehicles and yield if one is approaching from behind.
         """
         # Check for emergency vehicles approaching from behind
-        emergency_approaching = self._check_emergency_vehicle_approaching()
+        emergency_vehicle = self._check_emergency_vehicle_approaching()
         
-        if emergency_approaching:
-            # Try to yield by changing lanes to the right or slowing down
-            self._yield_to_emergency()
+        if emergency_vehicle:
+            # Try to yield by changing lanes AWAY from the emergency vehicle
+            self._yield_to_emergency(emergency_vehicle)
             self._emergency_yielding = True
         else:
             # Reset yielding behavior when no emergency vehicle is nearby
@@ -70,82 +93,79 @@ class YieldingIDMVehicle(IDMVehicle):
         # Use parent's IDM behavior
         super().act(action)
     
-    def _check_emergency_vehicle_approaching(self) -> bool:
+    def _check_emergency_vehicle_approaching(self):
         """
-        Check if an emergency vehicle is approaching from behind.
+        Look for emergency vehicles approaching from behind that we should yield to.
         
         Returns:
-            True if an emergency vehicle is detected approaching from behind
+            EmergencyVehicle if one is close and approaching, otherwise None
         """
         if not hasattr(self, 'road') or not self.road:
-            return False
+            return None
         
-        current_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
-        current_position = self.position[0]  # Longitudinal position
+        my_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
+        my_position = self.position[0]
         
+        # Check each vehicle on the road
         for vehicle in self.road.vehicles:
-            # Check if it's an emergency vehicle
-            if isinstance(vehicle, EmergencyVehicle) and vehicle is not self:
-                vehicle_lane = vehicle.lane_index[2] if len(vehicle.lane_index) > 2 else 0
-                vehicle_position = vehicle.position[0]
-                
-                # Check if emergency vehicle is behind (lower longitudinal position)
-                # and in the same lane or adjacent lanes (within 1 lane)
-                distance_behind = current_position - vehicle_position
-                if (distance_behind > 0 and 
-                    distance_behind < 150 and  # Within 150m behind
-                    abs(vehicle_lane - current_lane) <= 1):  # Same or adjacent lane
-                    # Check if it's approaching (faster speed or catching up)
-                    if vehicle.speed > self.speed or (vehicle.speed > 0 and distance_behind < 80):
-                        return True
+            if not isinstance(vehicle, EmergencyVehicle) or vehicle is self:
+                continue
+            
+            emergency_lane = vehicle.lane_index[2] if len(vehicle.lane_index) > 2 else 0
+            emergency_position = vehicle.position[0]
+            
+            # How far behind us is the emergency vehicle?
+            distance_behind = my_position - emergency_position
+            
+            # Is it close enough to care about (behind us within 150m)?
+            if distance_behind <= 0 or distance_behind > 150:
+                continue
+            
+            # Is it in our lane or an adjacent lane?
+            lane_difference = abs(emergency_lane - my_lane)
+            if lane_difference > 1:
+                continue
+            
+            # Is it actually approaching (going faster than us or very close)?
+            is_faster = vehicle.speed > self.speed
+            is_very_close = vehicle.speed > 0 and distance_behind < 80
+            
+            if is_faster or is_very_close:
+                return vehicle  # Yes, we should yield!
         
-        return False
+        return None  # No emergency vehicle approaching
     
-    def _yield_to_emergency(self):
+    def _yield_to_emergency(self, emergency_vehicle):
         """
-        Yield to emergency vehicle by attempting to change lanes to the right.
-        If not possible, slow down.
+        Get out of the way of the emergency vehicle!
+        Try to move right. If we can't, slow down.
         """
-        current_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
-        max_lane = len(self.road.network.graph["0"]["1"]) - 1
+        my_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
+        rightmost_lane = len(self.road.network.graph["0"]["1"]) - 1
         
-        # Try to change to the right lane (higher lane index = right side)
-        if current_lane < max_lane:
-            # Make right lane changes more favorable by adjusting MOBIL parameters
-            # Lower delta makes lane changes easier (more likely)
-            self.delta = -1.0  # Very low threshold - prioritize yielding
-            # Increase politeness to allow yielding even if slightly slower
-            self.politeness = 0.8
-            
-            # Check if right lane is relatively clear
-            right_lane_index = ("0", "1", current_lane + 1)
-            right_lane_clear = True
-            min_distance = 50  # Minimum safe distance
-            
-            for vehicle in self.road.vehicles:
-                if vehicle is not self and vehicle.lane_index == right_lane_index:
-                    distance = abs(vehicle.position[0] - self.position[0])
-                    if distance < min_distance:
-                        right_lane_clear = False
-                        break
-            
-            # If right lane is clear, the MOBIL model should favor the lane change
-            # We've already adjusted delta and politeness to make it more likely
+        # Can we move to the right?
+        if my_lane < rightmost_lane:
+            # Yes! Make lane change to the right very attractive
+            self.delta = -1.0  # Lower threshold = more willing to change lanes
+            self.politeness = 0.8  # Be cooperative, accept slower speed to help others
         else:
-            # Already in rightmost lane, slow down to let emergency vehicle pass
-            # Reduce target speed temporarily
+            # No, we're already in the rightmost lane
+            # Slow down to let the emergency vehicle pass
             if not self._speed_modified:
                 self._original_target_speed = self.target_speed
                 self._speed_modified = True
+            
+            # Reduce speed by 15% (minimum 18 m/s)
             if self.speed > 18.0:
-                self.target_speed = max(18.0, self.speed * 0.85)  # Slow down by 15%
+                self.target_speed = max(18.0, self.speed * 0.85)
     
     def _reset_yielding_behavior(self):
-        """Reset behavior parameters to normal after yielding."""
-        # Reset to default MOBIL parameters
-        self.delta = 0.0  # Default threshold
-        self.politeness = 0.5  # Default politeness
-        # Restore original target speed if we modified it
+        """Return to normal driving behavior after the emergency vehicle has passed."""
+        # Reset lane change parameters to normal
+        self.delta = 0.0
+        self.politeness = 0.5
+        
+        # Restore normal target speed if we had slowed down
         if self._speed_modified and self._original_target_speed is not None:
             self.target_speed = self._original_target_speed
             self._speed_modified = False
@@ -159,29 +179,36 @@ class EmergencyVehicle(IDMVehicle):
     
     def __init__(self, road, position, heading=0, speed=0):
         super().__init__(road, position, heading, speed)
-        # Set purple color (RGB normalized 0-1)
-        self.color = (0.5, 0.0, 0.5)  # Purple
-        # Set higher desired speed than normal traffic
-        self.target_speed = 35.0  # Faster than speed limit (25 m/s) and ego vehicle
-        # Aggressive behavior for overtaking
+        
+        # Visual appearance
+        self.color = (0.8, 0.0, 0.8)  # Bright purple/magenta for visibility
+        
+        # Speed settings - emergency vehicles are fast!
+        self.target_speed = 35.0  # Faster than the 25 m/s speed limit
         self.speed = min(speed, self.target_speed)
-        # More aggressive lane changing parameters for MOBIL
-        self.politeness = 0.0  # No politeness - always prioritize own speed (default is usually 0.5)
-        self.delta = -0.5  # Lower threshold for lane changes (default is usually 0.0)
-        # Lower time headway for more aggressive following
-        self.T = 0.5  # Default is usually 1.0-1.5
-        # Higher acceleration capability
-        self.ACC_MAX = 6.0  # More aggressive acceleration (default is usually 3.0)
+        
+        # Aggressive driving behavior
+        self.politeness = 0.0  # Don't slow down for others
+        self.delta = -0.5  # Change lanes easily
+        self.T = 0.5  # Follow closer (smaller time headway)
+        self.ACC_MAX = 6.0  # Accelerate faster
+        
+        # Mark this vehicle so the agent can detect it
+        self.is_emergency = True
     
     def act(self, action=None):
         """
-        Emergency vehicles always try to maintain high speed and overtake.
+        Emergency vehicles prefer the leftmost (fast) lane and drive aggressively.
         """
-        # Force high speed - emergency vehicles accelerate faster
-        if self.speed < self.target_speed:
-            self.speed = min(self.speed + 3.0, self.target_speed)
+        my_lane = self.lane_index[2] if len(self.lane_index) > 2 else 0
         
-        # Use parent's IDM behavior but with aggressive parameters
+        if my_lane > 0:
+            # We're not in the leftmost lane yet - try to move left
+            self.delta = -0.8  # Make left lane changes attractive
+        else:
+            # We're already in the leftmost lane - stay here
+            self.delta = 0.2  # Prefer staying in current lane
+        
         super().act(action)
 
 
@@ -203,6 +230,7 @@ class Group5Env(AbstractEnv):
         - Progress: 0.4 (forward movement)
         - Success: 1.0 (reaching the end)
         - Lane change: -0.01 (discourage weaving)
+        - Yielding: Reward for not blocking emergency vehicle
     """
 
     @classmethod
@@ -210,13 +238,24 @@ class Group5Env(AbstractEnv):
         config = super().default_config()
         config.update(
             {
-                "observation": {"type": "Kinematics"},
+                "observation": {
+                    "type": "Kinematics",
+                    # Add 'is_emergency' to features so agent can distinguish Emergency Vehicle
+                    "features": ["x", "y", "vx", "vy", "is_emergency"], 
+                    "features_range": {
+                        "x": [0, 625],
+                        "y": [-10, 20],
+                        "vx": [0, 40],
+                        "vy": [-5, 5],
+                        "is_emergency": [0, 1],
+                    },
+                },
                 "action": {"type": "DiscreteMetaAction"},
                 "lanes_count": 5,
                 "road_length": 625,  # meters
                 "speed_limit": 25,   # m/s
-                "duration": 40,      # seconds
-                "vehicles_count": 20,
+                "duration": 50,      # seconds
+                "vehicles_count": 10,
                 "vehicles_density": 1.0,
 
                 # Lane closure config
@@ -229,9 +268,10 @@ class Group5Env(AbstractEnv):
                 "stalled_position_after_range": [450, 550],
 
                 # Emergency vehicle config
-                "emergency_vehicles_count": 2,  # Number of emergency vehicles
+                "emergency_vehicles_count": 1,  # Number of emergency vehicles
                 "emergency_vehicle_speed": 35.0,  # Target speed (m/s)
                 "emergency_spawn_range": [100, 500],  # Where they can spawn
+                "emergency_spawn_probability": 0.5,  # 50% chance to spawn emergency vehicle
 
                 # Reward weights - tuned for hazard navigation
                 "collision_reward": -1.5,      # Heavy penalty for crashing
@@ -239,7 +279,7 @@ class Group5Env(AbstractEnv):
                 "progress_reward": 0.4,        # Good reward for moving forward
                 "success_reward": 1.0,         # Big bonus for completion
                 "lane_change_reward": -0.01,   # Small penalty for lane changes
-                "yielding_reward": 0.0,        # For future emergency vehicle
+                "yielding_reward": 0.5,        # Strong reward for yielding to emergency vehicles
 
                 # Reward settings
                 "normalize_reward": False,
@@ -286,27 +326,30 @@ class Group5Env(AbstractEnv):
             longitudinal=stalled_position,
             speed=0.0
         )
+        # Stalled vehicle is NOT an emergency vehicle
+        stalled_vehicle.is_emergency = False
         self.road.vehicles.append(stalled_vehicle)
 
-        # Emergency Vehicles
-        emergency_count = self.config["emergency_vehicles_count"]
-        spawn_min, spawn_max = self.config["emergency_spawn_range"]
-        
-        for _ in range(emergency_count):
-            # Random lane for emergency vehicle
-            emergency_lane = self.np_random.integers(0, self.config["lanes_count"])
-            emergency_position = self.np_random.uniform(spawn_min, spawn_max)
+        # Emergency Vehicles (spawn with probability)
+        if self.np_random.random() < self.config["emergency_spawn_probability"]:
+            emergency_count = self.config["emergency_vehicles_count"]
+            spawn_min, spawn_max = self.config["emergency_spawn_range"]
             
-            # Create emergency vehicle
-            emergency_vehicle = EmergencyVehicle.make_on_lane(
-                self.road,
-                lane_index=("0", "1", emergency_lane),
-                longitudinal=emergency_position,
-                speed=self.config["emergency_vehicle_speed"] * 0.8  # Start at 80% of target speed
-            )
-            # Update target speed from config
-            emergency_vehicle.target_speed = self.config["emergency_vehicle_speed"]
-            self.road.vehicles.append(emergency_vehicle)
+            for _ in range(emergency_count):
+                # Random lane for emergency vehicle
+                emergency_lane = self.np_random.integers(0, self.config["lanes_count"])
+                emergency_position = self.np_random.uniform(spawn_min, spawn_max)
+                
+                # Create emergency vehicle
+                emergency_vehicle = EmergencyVehicle.make_on_lane(
+                    self.road,
+                    lane_index=("0", "1", emergency_lane),
+                    longitudinal=emergency_position,
+                    speed=self.config["emergency_vehicle_speed"] * 0.8  # Start at 80% of target speed
+                )
+                # Update target speed from config
+                emergency_vehicle.target_speed = self.config["emergency_vehicle_speed"]
+                self.road.vehicles.append(emergency_vehicle)
 
     def _create_road(self) -> None:
         """Create a straight 5-lane highway."""
@@ -327,6 +370,8 @@ class Group5Env(AbstractEnv):
         ego_vehicle = self.action_type.vehicle_class(
             self.road, ego_vehicle.position, ego_vehicle.heading, ego_vehicle.speed
         )
+        # Ego is NOT an emergency vehicle
+        ego_vehicle.is_emergency = False
         self.controlled_vehicles = [ego_vehicle]
         self.road.vehicles.append(ego_vehicle)
 
@@ -338,58 +383,96 @@ class Group5Env(AbstractEnv):
                 spacing=1 / self.config["vehicles_density"]
             )
             traffic_vehicle.randomize_behavior()
+            # Traffic is NOT an emergency vehicle
+            traffic_vehicle.is_emergency = False
             self.road.vehicles.append(traffic_vehicle)
 
     def _rewards(self, action: Action) -> dict[str, float]:
         """
-        Calculate individual reward components.
-        All components are normalized to reasonable ranges.
-
-        Returns:
-            Dictionary of reward components with their values
+        Calculate how well the agent is doing.
+        Returns a dictionary of reward components.
         """
-        ego = self.vehicle
+        ego = self.vehicle  # The agent's vehicle
 
-        # === 1. COLLISION PENALTY ===
-        collision = float(ego.crashed)
+        # 1. Did we crash? (Big penalty)
+        collision_penalty = float(ego.crashed)
 
-        # === 2. SPEED REWARD ===
+        # 2. Are we going fast enough?
         forward_speed = ego.speed * np.cos(ego.heading)
-        scaled_speed = utils.lmap(
+        speed_normalized = utils.lmap(
             forward_speed,
-            self.config["reward_speed_range"],
+            self.config["reward_speed_range"],  # [20, 28] m/s
             [0, 1]
         )
-        high_speed = np.clip(scaled_speed, 0, 1)
+        speed_reward = np.clip(speed_normalized, 0, 1)
 
-        # === 3. PROGRESS REWARD ===
-        progress = ego.position[0] / self.config["road_length"]
+        # 3. How far have we traveled?
+        progress_reward = ego.position[0] / self.config["road_length"]
 
-        # === 4. SUCCESS BONUS ===
-        reached_end = (
+        # 4. Did we reach the end successfully?
+        reached_end_safely = (
             ego.position[0] >= self.config["road_length"]
             and not ego.crashed
         )
-        success = float(reached_end)
+        success_bonus = float(reached_end_safely)
 
-        # === 5. ON-ROAD CHECK ===
-        on_road = float(ego.on_road)
+        # 5. Are we still on the road?
+        on_road_reward = float(ego.on_road)
 
-        # === 6. LANE CHANGE PENALTY ===
-        lane_change = float(action in [0, 2])
+        # 6. Did we change lanes? (Small penalty for unnecessary lane changes)
+        changed_lanes = action in [0, 2]  # 0 = left, 2 = right
+        lane_change_penalty = float(changed_lanes)
 
-        # === 7. YIELDING REWARD ===
-        yielding = 0.0
+        # 7. Are we yielding properly to emergency vehicles?
+        yielding_reward = self._calculate_yielding_reward()
 
+        # Return all the reward components
         return {
-            "collision_reward": collision,
-            "high_speed_reward": high_speed,
-            "progress_reward": progress,
-            "success_reward": success,
-            "on_road_reward": on_road,
-            "lane_change_reward": lane_change,
-            "yielding_reward": yielding,
+            "collision_reward": collision_penalty,
+            "high_speed_reward": speed_reward,
+            "progress_reward": progress_reward,
+            "success_reward": success_bonus,
+            "on_road_reward": on_road_reward,
+            "lane_change_reward": lane_change_penalty,
+            "yielding_reward": yielding_reward,
         }
+    
+    def _calculate_yielding_reward(self) -> float:
+        """
+        Check if we're properly yielding to emergency vehicles.
+        Returns positive reward for yielding, negative for blocking.
+        """
+        ego = self.vehicle
+        my_lane = ego.lane_index[2]
+        my_position = ego.position[0]
+        
+        # Look for emergency vehicles near us
+        for emergency_vehicle in self.road.vehicles:
+            if not isinstance(emergency_vehicle, EmergencyVehicle):
+                continue
+            if emergency_vehicle is ego:
+                continue
+            
+            ev_lane = emergency_vehicle.lane_index[2]
+            ev_position = emergency_vehicle.position[0]
+            
+            # How far behind us is the emergency vehicle?
+            distance_behind = my_position - ev_position
+            
+            # Only care if it's behind us within 60 meters
+            if not (0 < distance_behind < 60):
+                continue
+            
+            # Are we blocking it?
+            if ev_lane == my_lane:
+                # BAD: We're in the emergency vehicle's way!
+                return -0.5
+            else:
+                # GOOD: Emergency vehicle is nearby but we're not blocking it
+                return 0.1
+        
+        # No emergency vehicle nearby
+        return 0.0
 
     def _reward(self, action: Action) -> float:
         """
