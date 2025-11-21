@@ -28,7 +28,7 @@ python record_episodes.py
 - **Speed limit**: 25 m/s (~56 mph)
 - **Time limit**: 50 seconds per episode
 
-### 🚨 Emergency Vehicles (New!)
+### 🚨 Emergency Vehicles
 - **Bright purple** high-speed vehicles (35 m/s)
 - Always seek the **leftmost (fast) lane**
 - **50% spawn probability** per episode
