@@ -45,10 +45,11 @@ python record_episodes.py
 3. **Dynamic Traffic**: Vehicles that react to emergency vehicles
 
 ### 🎮 Custom Observation Space
-- **5x5 kinematics matrix** includes:
-  - Standard features: position, velocity
-  - **`is_emergency` flag**: 1.0 for emergency vehicles, 0.0 for others
-  - Allows agent to **detect and respond** to emergency vehicles
+- **Lidar Observation**:
+  - **128 laser rays** scanning 360 degrees
+  - **120 meter range** 
+  - Detects walls, stalled cars, and traffic naturally
+  - Normalized distances [0, 1]
 
 ### Goal
 Navigate from start to end (625m) while:
@@ -180,28 +181,23 @@ env.close()
 
 ## 📊 Observation Space
 
-**Type**: Kinematics (Enhanced)
+**Type**: LidarObservation
 
-Returns a **(5, 5)** array with information about nearby vehicles:
-- `presence`: 1 if vehicle exists, 0 otherwise
-- `x`: x-coordinate (normalized to [0, 625])
-- `y`: y-coordinate (normalized to [-10, 20])
-- `vx`: x-velocity (normalized to [0, 40])
-- `vy`: y-velocity
-- **`is_emergency`**: 🚨 **1.0 for emergency vehicles, 0.0 for others**
+Returns a **(128,)** array of normalized distances:
+- **128 rays**: Scans 360 degrees around the vehicle
+- **Range**: 120 meters
+- **Values**: 
+  - `1.0`: No obstacle within range
+  - `0.0`: Obstacle immediately adjacent
+  - `0.5`: Obstacle at 60m
 
-The observation includes the ego vehicle and 4 nearest vehicles.
+The Lidar naturally detects:
+- Lane closures (walls)
+- Stalled vehicles
+- Moving traffic
+- Emergency vehicles 
 
-### Using Emergency Vehicle Detection
 
-```python
-obs, info = env.reset()
-# obs.shape = (5, 5)
-# obs[:, 4] contains is_emergency flags for each observed vehicle
-emergency_nearby = any(obs[:, 4] > 0.5)
-if emergency_nearby:
-    print("Emergency vehicle detected! Should yield!")
-```
 
 ---
 

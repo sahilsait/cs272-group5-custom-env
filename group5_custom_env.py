@@ -239,16 +239,10 @@ class Group5Env(AbstractEnv):
         config.update(
             {
                 "observation": {
-                    "type": "Kinematics",
-                    # Add 'is_emergency' to features so agent can distinguish Emergency Vehicle
-                    "features": ["x", "y", "vx", "vy", "is_emergency"], 
-                    "features_range": {
-                        "x": [0, 625],
-                        "y": [-10, 20],
-                        "vx": [0, 40],
-                        "vy": [-5, 5],
-                        "is_emergency": [0, 1],
-                    },
+                    "type": "LidarObservation",
+                    "cells": 128,
+                    "maximum_range": 120,
+                    "normalize": True
                 },
                 "action": {"type": "DiscreteMetaAction"},
                 "lanes_count": 5,
